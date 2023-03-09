@@ -150,3 +150,5 @@ Go to the [Clipboard Wiki](https://github.com/Slackadays/Clipboard/wiki) for mor
 ![Thank You!](documentation/readme-banners/ThankYou.png)
 
 Thank you to all the contributors who have helped make Clipboard great.
+
+[![CodeScene undefined](https://test-env.enterprise.codescene.io/1/status-badges/undefined?component-name=%5Bobject%20Object%5D)](https://test-env.enterprise.codescene.io/1/analyses/latest/dashboard)
