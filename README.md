@@ -1,4 +1,4 @@
-[![CodeScene Code Health](https://test-env.enterprise.codescene.io/1/status-badges/code-health)](https://test-env.enterprise.codescene.io/1/analyses/latest)
+[![CodeScene Code Health](https://test-env.enterprise.codescene.io/1/status-badges/code-health?component-name=codescene%2Fcloud)](https://test-env.enterprise.codescene.io/1/analyses/latest/architecture/biomarkers?component=codescene%2Fcloud)
 
 
 ![Clipboard Banner](documentation/readme-banners/CBBanner.png)
