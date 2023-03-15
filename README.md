@@ -1,4 +1,4 @@
-[![CodeScene Missed Goals](https://test-env.enterprise.codescene.io/2/status-badges/missed-goals)](https://test-env.enterprise.codescene.io/2/analyses/latest/dashboard)
+[![CodeScene ](https://codescene.com/status/analyzed-by-codescene-badge.svg)](CS_URL/2/analyses/latest/dashboard)
 
 ![Clipboard Banner](documentation/readme-banners/CBBanner.png)
 
