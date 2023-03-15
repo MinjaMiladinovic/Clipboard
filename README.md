@@ -1,5 +1,4 @@
-
-[![CodeScene Code Health](https://test-env.enterprise.codescene.io/2/status-badges/code-health)](https://test-env.enterprise.codescene.io/2/analyses/latest)
+[![CodeScene ](https://codescene.com/status/analyzed-by-codescene-badge.svg)](CS_URL/2/analyses/latest)
 
 
 ![Clipboard Banner](documentation/readme-banners/CBBanner.png)
