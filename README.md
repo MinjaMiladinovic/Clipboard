@@ -1,5 +1,4 @@
-
-[![CodeScene System Mastery](https://test-env.enterprise.codescene.io/1/status-badges/system-mastery)](https://test-env.enterprise.codescene.io/1/analyses/latest)
+[![CodeScene System Mastery](https://test-env.enterprise.codescene.io/1/status-badges/system-mastery?component-name=codescene%2Ffeatures)](https://test-env.enterprise.codescene.io/1/analyses/latest)
 
 ![Clipboard Banner](documentation/readme-banners/CBBanner.png)
 
