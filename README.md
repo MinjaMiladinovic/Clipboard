@@ -1,5 +1,4 @@
-
-[![CodeScene Code Health](https://test-env.enterprise.codescene.io/1/status-badges/code-health?component-name=codescene%2Fanalysis)](https://test-env.enterprise.codescene.io/1/analyses/latest/architecture/biomarkers?component=codescene%2Fanalysis)
+[![CodeScene Code Health](https://test-env.enterprise.codescene.io/1/status-badges/code-health?component-name=codescene%2Ffeatures)](https://test-env.enterprise.codescene.io/1/analyses/latest/architecture/biomarkers?component=codescene%2Ffeatures)
 
 ![Clipboard Banner](documentation/readme-banners/CBBanner.png)
 
