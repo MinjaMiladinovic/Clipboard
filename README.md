@@ -1,4 +1,3 @@
-[![CodeScene ](https://codescene.com/status/analyzed-by-codescene-badge.svg)](CS_URL/2/analyses/latest/dashboard)
 
 ![Clipboard Banner](documentation/readme-banners/CBBanner.png)
 
