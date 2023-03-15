@@ -1,8 +1,8 @@
-[![CodeScene Code Health](https://test-env.enterprise.codescene.io/2/status-badges/code-health)](https://test-env.enterprise.codescene.io/2/analyses/latest/dashboard)
+[![CodeScene Code Health](https://test-env.enterprise.codescene.io/1/status-badges/code-health)](https://test-env.enterprise.codescene.io/1/analyses/latest/dashboard)
 
-[![CodeScene Missed Goals](https://test-env.enterprise.codescene.io/2/status-badges/missed-goals)](https://test-env.enterprise.codescene.io/2/analyses/latest/dashboard)
+[![CodeScene Missed Goals](https://test-env.enterprise.codescene.io/1/status-badges/missed-goals)](https://test-env.enterprise.codescene.io/1/analyses/latest/dashboard)
 
-[![CodeScene System Mastery](https://test-env.enterprise.codescene.io/2/status-badges/system-mastery)](https://test-env.enterprise.codescene.io/2/analyses/latest/dashboard)
+[![CodeScene System Mastery](https://test-env.enterprise.codescene.io/1/status-badges/system-mastery)](https://test-env.enterprise.codescene.io/1/analyses/latest/dashboard)
 
 ![Clipboard Banner](documentation/readme-banners/CBBanner.png)
 
