@@ -153,3 +153,5 @@ Go to the [Clipboard Wiki](https://github.com/Slackadays/Clipboard/wiki) for mor
 
 Thank you to all the contributors who have helped make Clipboard great.
 
+
+[![CodeScene Code Health](https://test-env.enterprise.codescene.io/2/status-badges/code-health?component-name=Clipboard%2Fsrc%2Fclipboard)](https://test-env.enterprise.codescene.io/2/analyses/latest/architecture/biomarkers?component=Clipboard%2Fsrc%2Fclipboard)
