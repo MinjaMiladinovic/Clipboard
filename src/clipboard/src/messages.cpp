@@ -12,293 +12,934 @@
 
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.*/
+#include <vector>
+#include <cstring>
+#include <filesystem>
+#include <algorithm>
+#include <utility>
+#include <string_view>
+#include <locale>
+#include <fstream>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <iostream>
+#include <csignal>
+#include <thread>
+#include <condition_variable>
+#include <mutex>
+#include <sstream>
 #include "clipboard.hpp"
 
-ActionArray<std::string_view, 8> actions = {{
-    "cut",
-    "copy",
-    "paste",
-    "pipe in",
-    "pipe out",
-    "clear",
-    "show",
-    "edit"
+#if defined(_WIN32) || defined(_WIN64)
+#include <io.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shlobj.h>
+#define isatty _isatty
+#define fileno _fileno
+#include "windows.hpp"
+#endif
+
+#if defined(__linux__) || defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#include <sys/ioctl.h>
+#endif
+
+namespace fs = std::filesystem;
+
+std::string clipboard_name = "0";
+
+std::condition_variable cv;
+std::mutex m;
+std::atomic<SpinnerState> spinner_state = SpinnerState::Done;
+std::thread indicator;
+
+Copying copying;
+Filepath filepath;
+Successes successes;
+IsTTY is_tty;
+Action action;
+
+std::array<std::pair<std::string_view, std::string_view>, 8> colors = {{
+    {"{red}", "\033[38;5;196m"},
+    {"{green}", "\033[38;5;40m"},
+    {"{yellow}", "\033[38;5;214m"},
+    {"{blue}", "\033[38;5;51m"},
+    {"{orange}", "\033[38;5;208m"},
+    {"{pink}", "\033[38;5;219m"},
+    {"{bold}", "\033[1m"},
+    {"{blank}", "\033[0m"}
 }};
 
-ActionArray<std::string_view, 8> action_shortcuts = {{
-    "ct",
-    "cp",
-    "p",
-    "pin",
-    "pout",
-    "clr",
-    "sh",
-    "ed"
-}};
-
-ActionArray<std::string_view, 8> doing_action = {{
-    "Cutting",
-    "Copying",
-    "Pasting",
-    "Piping in",
-    "Piping out",
-    "Clearing"
-    "Editing"
-}};
-
-ActionArray<std::string_view, 8> did_action = {{
-    "Cut",
-    "Copied",
-    "Pasted",
-    "Piped in",
-    "Piped out",
-    "Cleared",
-    "Edited"
-}};
-
-std::string_view help_message = "{blue}▏This is Clipboard %s, the cut, copy, and paste system for the command line.{blank}\n"
-                                "{blue}{bold}▏How To Use{blank}\n"
-                                "{orange}▏clipboard cut (item) [items]{blank} {pink}(This cuts an item or items.){blank}\n"
-                                "{orange}▏clipboard copy (item) [items]{blank} {pink}(This copies an item or items.){blank}\n"
-                                "{orange}▏clipboard paste{blank} {pink}(This pastes a clipboard.){blank}\n"
-                                "{orange}▏clipboard show{blank} {pink}(This shows what's in a clipboard.){blank}\n"
-                                "{orange}▏clipboard clear{blank} {pink}(This clears a clipboard's contents.){blank}\n"
-                                "{blue}▏You can substitute \"cb\" for \"clipboard\" and use various shorthands for the actions to save time.{blank}\n"
-                                "{blue}▏You can also choose which clipboard you want to use by adding a number to the end, or {bold}_{blank}{blue} to use a persistent clipboard.{blank}\n"
-                                "{blue}{bold}▏Examples{blank}\n"
-                                "{orange}▏cb ct Nuclear_Launch_Codes.txt contactsfolder{blank} {pink}(This cuts the following items into the default clipboard, 0.){blank}\n"
-                                "{orange}▏clipboard cp1 dogfood.conf{blank} {pink}(This copies the following items into clipboard 1.){blank}\n"
-                                "{orange}▏cb p1{blank} {pink}(This pastes clipboard 1.){blank}\n"
-                                "{orange}▏cb sh4{blank} {pink}(This shows the contents of clipboard 4.){blank}\n"
-                                "{orange}▏cb clr{blank} {pink}(This clears the contents of the default clipboard.){blank}\n"
-                                "{blue}{bold}▏Configuration{blank}\n"
-                                "{orange}▏CI: {pink}Set to make Clipboard overwrite existing items without a user prompt when pasting.{blank}\n"
-                                "{orange}▏FORCE_COLOR: {pink}Set to make Clipboard always show color regardless of what you set NO_COLOR to.{blank}\n"
-                                "{orange}▏TMPDIR: {pink}Set to the directory that Clipboard (and other programs) will use to hold the items you cut or copy into temporary clipboards.{blank}\n"
-                                "{orange}▏CLIPBOARD_TMPDIR: {pink}Set to the directory that only Clipboard will use to hold the items you cut or copy into temporary clipboards.{blank}\n"
-                                "{orange}▏CLIPBOARD_PERSISTDIR: {pink}Set to the directory that only Clipboard will use to hold the items you cut or copy into persistent clipboards.{blank}\n"
-                                "{orange}▏CLIPBOARD_ALWAYS_PERSIST: {pink}Set to make Clipboard always use persistent clipboards.{blank}\n"
-                                "{orange}▏CLIPBOARD_NOGUI: {pink}Set to disable GUI clipboard integration.{blank}\n"
-                                "{orange}▏NO_COLOR: {pink}Set to make Clipboard not show color.{blank}\n"
-                                "{blue}▏You can show this help screen anytime with {bold}clipboard -h{blank}{blue}, {bold}clipboard --help{blank}{blue}, or{bold} clipboard help{blank}{blue}.\n"
-                                "{blue}▏You can also get more help in our Discord server at {bold}https://discord.gg/J6asnc3pEG{blank}\n"
-                                "{blue}▏Copyright (C) 2022 Jackson Huff. Licensed under the GPLv3.{blank}\n"
-                                "{blue}▏This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you are welcome to redistribute it under certain conditions.{blank}\n";
-std::string_view check_clipboard_status_message = "{blue}• There are items in these clipboards:\n";
-std::string_view clipboard_item_contents_message = "{blue}• Here are the first {bold}%i{blank}{blue} items in clipboard {bold}%s{blank}{blue}: {blank}\n";
-std::string_view clipboard_text_contents_message = "{blue}• Here are the first {bold}%i{blank}{blue} bytes in clipboard {bold}%s{blank}{blue}: {blank}\n";
-std::string_view no_clipboard_contents_message = "{blue}• There is currently nothing in the clipboard.{blank}\n";
-std::string_view clipboard_action_prompt = "{pink}Add {bold}cut, copy, {blank}{pink}or{bold} paste{blank}{pink} to the end, like {bold}clipboard copy{blank}{pink} to get started, or if you need help, try {bold}clipboard -h{blank}{pink} to show the help screen.{blank}\n";
-std::string_view no_valid_action_message = "{red}╳ You did not specify a valid action ({bold}\"%s\"{blank}{red}), or you forgot to include one. {pink}Try using or adding {bold}cut, copy, {blank}{pink}or {bold}paste{blank}{pink} instead, like {bold}clipboard copy.{blank}\n";
-std::string_view choose_action_items_message = "{red}╳ You need to choose something to %s.{pink} Try adding the items you want to %s to the end, like {bold}clipboard %s contacts.txt myprogram.cpp{blank}\n";
-std::string_view fix_redirection_action_message = "{red}╳ You can't use the {bold}%s{blank}{red} action with redirection here. {pink}Try removing {bold}%s{blank}{pink} or use {bold}%s{blank}{pink} instead, like {bold}clipboard %s{blank}{pink}.\n";
-std::string_view redirection_no_items_message = "{red}╳ You can't specify items when you use redirection. {pink}Try removing the items that come after {bold}clipboard [action].\n";
-std::string_view paste_success_message = "{green}✓ Pasted successfully{blank}\n";
-std::string_view clear_success_message = "{green}✓ Cleared the clipboard{blank}\n";
-std::string_view clear_fail_message = "{red}╳ Failed to clear the clipboard{blank}\n";
-std::string_view clipboard_failed_message = "{red}╳ Clipboard couldn't %s these items:{blank}\n";
-std::string_view and_more_fails_message = "{red}▏ ...and {bold}%i{blank}{red} more.{blank}\n";
-std::string_view and_more_items_message = "{blue}▏ ...and {bold}%i{blank}{blue} more.{blank}\n";
-std::string_view fix_problem_message = "{pink}▏ See if you have the needed permissions, or\n"
-                                       "▏ try double-checking the spelling of the files or what directory you're in.{blank}\n";
-std::string_view not_enough_storage_message = "{red}╳ There won't be enough storage available to paste all your items (%gkB to paste, %gkB available).{blank}{pink} Try double-checking what items you've selected or delete some files to free up space.{blank}\n";
-std::string_view item_already_exists_message = "{yellow}• The item {bold}%s{blank}{yellow} already exists here. Would you like to replace it? {pink}Add {bold}all {blank}{pink}or {bold}a{blank}{pink} to use this decision for all items. {bold}[(y)es/(n)o)] ";
-std::string_view bad_response_message = "{red}╳ Sorry, that wasn't a valid choice. Try again: {blank}{pink}{bold}[(y)es/(n)o)] ";
-std::string_view working_message = "{yellow}• %s... %i%s %s{blank}\r";
-std::string_view cancelled_message = "{green}✓ Cancelled %s{blank}\n";
-std::string_view pipe_success_message = "{green}✓ %s %i bytes{blank}\n";
-std::string_view one_item_success_message = "{green}✓ %s %s{blank}\n";
-std::string_view multiple_files_success_message = "{green}✓ %s %i files{blank}\n";
-std::string_view multiple_directories_success_message = "{green}✓ %s %i directories{blank}\n";
-std::string_view multiple_files_directories_success_message = "{green}✓ %s %i files and %i directories{blank}\n";
-std::string_view internal_error_message = "{red}╳ Internal error: %s\n▏ This is probably a bug, or you might be lacking permissions on this system.{blank}\n";
-
-void setLanguageES() {
-    actions[Action::Cut] = "cortar";
-    actions[Action::Copy] = "copiar";
-    actions[Action::Paste] = "pegar";
-    actions[Action::PipeIn] = "direccionar hacia adentro";
-    actions[Action::PipeOut] = "direccionar hacia afuera";
-    actions[Action::Clear] = "quitar";
-    actions[Action::Show] = "mostrar";
-
-    action_shortcuts[Action::Cut] = "ct";
-    action_shortcuts[Action::Copy] = "cp";
-    action_shortcuts[Action::Paste] = "p";
-    action_shortcuts[Action::PipeIn] = "dad";
-    action_shortcuts[Action::PipeOut] = "daf";
-    action_shortcuts[Action::Clear] = "qt";
-    action_shortcuts[Action::Show] = "ms";
-
-    doing_action[Action::Cut] = "Cortando";
-    doing_action[Action::Copy] = "Copiando";
-    doing_action[Action::Paste] = "Pegando";
-    doing_action[Action::PipeIn] = "Direccionando hacia adentro";
-    doing_action[Action::PipeOut] = "Direccionando hacia afuera";
-
-    did_action[Action::Cut] = "Cortó";
-    did_action[Action::Copy] = "Copió";
-    did_action[Action::Paste] = "Pegó";
-    did_action[Action::PipeIn] = "Direccionó hacia adentro";
-    did_action[Action::PipeOut] = "Direccionó hacia afuera";
-
-    help_message = "{blue}▏Esto es Clipboard %s, el sistema para cortar, copiar y pegar adentro del terminal.{blank}\n"
-                   "{blue}{bold}▏Cómo usar{blank}\n"
-                   "{orange}▏clipboard cortar (cosa) [cosas]{blank}\n"
-                   "{orange}▏clipboard copiar (cosa) [cosas]{blank}\n"
-                   "{orange}▏clipboard pegar{blank}\n"
-                   "{blue}▏Reemplaza \"cb\" por \"clipboard\" para que gastes menos tiempo.{blank}\n"
-                   "{blue}{bold}▏Ejemplos{blank}\n"
-                   "{orange}▏clipboard copiar cosas.conf{blank}\n"
-                   "{orange}▏cb cortar MisDocumentos.txt nuevacarpeta{blank}\n"
-                   "{orange}▏cb pegar{blank}\n"
-                   "{blue}▏Muestra este mensaje de ayudar en cualquier tiempo que quieras con {bold}clipboard -h{blank}{blue}, {bold}clipboard --help{blank}{blue} o{bold} clipboard help{blank}{blue}.\n"
-                   "{blue}▏Copyright (C) 2022 Jackson Huff. Licensed under the GPLv3.{blank}\n"
-                   "{blue}▏This program comes with ABSOLUTELY NO WARRANTY. This is free software, and you are welcome to redistribute it under certain conditions.{blank}\n";
-    no_valid_action_message = "{red}╳ No especificaste ninguna acción válida o se te olvidó. {pink}Inténta usar o añadir {bold}cortar, copiar o pegar{blank}{pink} en su lugar, como {bold}clipboard copiar.{blank}\n";
-    clipboard_item_contents_message = "{blue}• Aquí están las {bold}%i{blank}{blue} cosas primeras del portapapeles {bold}%s{blank}{blue}: {blank}\n";
-    no_clipboard_contents_message = "{blue}• No hay nada en Clipboard en este momento.{blank}\n";
-    clipboard_action_prompt = "{pink}Añade {bold}cortar, copiar {blank}{pink}o{bold} pegar{blank}{pink} al final, como {bold}clipboard copiar{blank}{pink} para comenzar, o si necesitas ayuda, haz {bold}clipboard -h{blank}{pink} para mostrar el mensaje de ayudar.{blank}\n";
-    choose_action_items_message = "{red}╳ Necesitas escoger una cosa para %s.{pink} Inténta añadir las cosas que quieres %s al final, como {bold}clipboard %s contactos.txt miprograma.cpp{blank}\n";
-    fix_redirection_action_message = "{red}╳ No se puede usar la acción {bold}%s{blank}{red} con la redirección. {pink}Inténta sacar {bold}%s{blank}{pink} o usa {bold}%s{blank}{pink} en su lugar, como {bold}clipboard %s{blank}{pink}.\n";
-    redirection_no_items_message = "{red}╳ No se pueden especificar las cosas con redirección. {pink}Inténta sacar las cosas que siguen {bold}clipboard [acción].\n";
-    paste_success_message = "{green}✓ Pegó con éxito{blank}\n";
-    clear_success_message = "{green}✓ Quitó el portapapeles{blank}\n";
-    clear_fail_message = "{red}╳ No pudo quitar el portapapeles{blank}\n";
-    clipboard_failed_message = "{red}╳ Clipboard no pudo %s estas cosas.{blank}\n";
-    and_more_fails_message = "{red}▏ ...y {bold}%i{blank}{red} más.{blank}\n";
-    and_more_items_message = "{blue}▏ ...y {bold}%i{blank}{blue} más.{blank}\n";
-    fix_problem_message = "{pink}▏ Verífica si tengas los permisos necesarios, o\n"
-                          "▏ vuelve a revisar el deletro de los archivos o la carpeta en que estás.{blank}\n";
-    not_enough_storage_message = "{red}╳ No habrá espacio suficiente para pegar todas tus cosas (%gkB a pegar, %gkB disponible).{blank}{pink} Vuelve a revisar las cosas que especificaste o saca algunas cosas para hacer más espacio.{blank}\n";
-    pipe_success_message = "{green}✓ %s %i bytes{blank}\n";
-    multiple_files_success_message = "{green}✓ %s %i archivos{blank}\n";
-    multiple_directories_success_message = "{green}✓ %s %i carpetas{blank}\n";
-    multiple_files_directories_success_message = "{green}✓ %s %i archivos y %i carpetas{blank}\n";
-    internal_error_message = "{red}╳ Error internal: %s{blank}\n";
+bool stopIndicator(bool change_condition_variable = true) {
+    SpinnerState expect = SpinnerState::Active;
+    if (!change_condition_variable) {
+        return spinner_state.exchange(SpinnerState::Cancel) == expect;
+    }
+    if (!spinner_state.compare_exchange_strong(expect, SpinnerState::Done)) {
+        return false;
+    }
+    cv.notify_one();
+    indicator.join();
+    return true;
 }
 
-void setLanguagePT() {
-    actions[Action::Cut] = "recortar";
-    actions[Action::Copy] = "copiar";
-    actions[Action::Paste] = "colar";
-    actions[Action::PipeIn] = "direcionar para dentro";
-    actions[Action::PipeOut] = "direcionar para fora";
-
-    doing_action[Action::Cut] = "Recortando";
-    doing_action[Action::Copy] = "Copiando";
-    doing_action[Action::Paste] = "Colando";
-    doing_action[Action::PipeIn] = "Direcionando para dentro";
-    doing_action[Action::PipeOut] = "Direcionando para fora";
-
-    did_action[Action::Cut] = "Recortou";
-    did_action[Action::Copy] = "Copiou";
-    did_action[Action::Paste] = "Colou";
-    did_action[Action::PipeIn] = "Direcionou para dentro";
-    did_action[Action::PipeOut] = "Direcionou para fora";
-
-    help_message = "{blue}▏Este é Clipboard %s, o sistema de recortar, copiar e colar para a linha de comando.{blank}\n"
-                   "{blue}{bold}▏Como utilizar{blank}\n"
-                   "{orange}▏clipboard recortar (item) [itens]{blank}\n"
-                   "{orange}▏clipboard copiar (item) [itens]{blank}\n"
-                   "{orange}▏clipboard colar{blank}\n"
-                   "{blue} Você pode utilizar \"cb\" ao invés de \"clipboard\" para ganhar tempo.{blank}\n"
-                   "{blue}{bold}▏Exemplos{blank}\n"
-                   "{orange}▏clipboard copiar ração.conf{blank}\n"
-                   "{orange}▏cb recortar Códigos_de_Lançamento_de_Mísseis.txt pastadecontatos{blank}\n"
-                   "{orange}▏cb colar{blank}\n"
-                   "{blue}▏Você pode rever esta tela de instruções à qualquer momento com {bold}clipboard -h{blank}{blue}, {bold}clipboard --help{blank}{blue} ou{bold} clipboard help{blank}{blue}.\n"
-                   "{blue}▏Copyright (C) 2022 Jackson Huff. Licensed under the GPLv3.{blank}\n"
-                   "{blue}▏Este programa vem com ABSOLUTAMENTE NENHUMA GARANTIA. Este é um software livre, e você é bem-vindo a redistribuí-lo sob certas condições.{blank}\n";
-    no_valid_action_message = "{red}╳ Você não especificou uma ação válida (\"%s\"), ou esqueceu de incluí-la. {pink}Tente utilizar {bold}recortar, copiar ou colar{blank}{pink}, como em {bold}clipboard copiar.{blank}\n";
-    no_clipboard_contents_message = "{red}╳ Você não especificou uma ação válida. {pink}Tente adicionar {bold}recortar, copiar, or colar{blank}{pink} no final, como em {bold}clipboard copiar{blank}{pink}. Caso precise de ajuda, tente {bold}clipboard -h{blank}{pink} para mostrar a tela de instruções.{blank}\n";
-    choose_action_items_message = "{red}╳ Você precisa especificar algo para %s.{pink} Tenta adicionar os itens que você quer %s ao final, como em {bold}clipboard %s contatos.txt meuprograma.cpp{blank}\n";
-    fix_redirection_action_message = "{red}╳ Você não pode {bold}%s{blank}{red} com redirecionamento aqui. {pink}Tente remover {bold}%s{blank}{pink} ou utilizar {bold}%s{blank}{pink}, como em {bold}clipboard %s{blank}{pink}.\n";
-    redirection_no_items_message = "{red}╳ Você não pode especificar itens ao redirecionar. {pink}Tente remover itens que vêm após {bold}clipboard [action].\n";
-    paste_success_message = "{green}✓ Colado com sucesso{blank}\n";
-    clipboard_failed_message = "{red}╳ Clipboard não pôde %s esses itens.{blank}\n";
-    and_more_fails_message = "{red}▏ ...e mais {bold}%i{blank}{red}.{blank}\n";
-    and_more_items_message = "{blue}▏ ...e mais {bold}%i{blank}{blue}.{blank}\n";
-    fix_problem_message = "{pink}▏ Veja se você possui as permissões necessárias, ou\n"
-                          "▏ verifique a ortografia do arquivo ou diretório que voce está.{blank}\n";
-    pipe_success_message = "{green}✓ %s %i bytes{blank}\n";
-    multiple_files_success_message = "{green}✓ %s %i arquivos{blank}\n";
-    multiple_directories_success_message = "{green}✓ %s %i diretórios{blank}\n";
-    multiple_files_directories_success_message = "{green}✓ %s %i arquivos e %i diretórios{blank}\n";
-    internal_error_message = "{red}╳ Erro interno: %s\n▏ Isso é provavelmente um bug.{blank}\n";
+std::pair<int, int> terminalSize() {
+    #if defined(_WIN32) || defined(_WIN64)
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    int columns, rows;
+    GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
+    columns = csbi.srWindow.Right - csbi.srWindow.Left + 1;
+    rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
+    return {columns, rows};
+    #elif defined(__linux__) || defined(__unix__) || defined(__APPLE__)
+    struct winsize w;
+    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
+    return {w.ws_col, w.ws_row};
+    #else
+    return {80, 24};
+    #endif
 }
 
-void setLanguageTR() {
-    actions[Action::Cut] = "kes";
-    actions[Action::Copy] = "kopyala";
-    actions[Action::Paste] = "yapistir";
-    actions[Action::PipeIn] = "ice yonlendir";
-    actions[Action::PipeOut] = "disa yonlendir";
-    actions[Action::Show] = "goster";
-    actions[Action::Clear] = "temizle";
+namespace PerformAction {
+    void copy() {
+        if (copying.items.size() == 1 && !fs::exists(copying.items.at(0))) {
+            std::ofstream file(filepath.main / constants.pipe_file);
+            file << copying.items.at(0).string();
+            copying.buffer = copying.items.at(0).string();
+            printf(replaceColors("{green}✓ Copied text \"{bold}%s{blank}{green}\"{blank}\n").data(), copying.items.at(0).string().data());
+            return;
+        }
+        std::ofstream originalFiles;
+        if (action == Action::Cut) {
+            originalFiles.open(filepath.original_files);
+        }
+        for (const auto& f : copying.items) {
+            auto copyItem = [&](const bool use_regular_copy = copying.use_safe_copy) {
+                if (fs::is_directory(f)) {
+                    if (f.filename() == "") {
+                        fs::create_directories(filepath.main / f.parent_path().filename());
+                        fs::copy(f, filepath.main / f.parent_path().filename(), copying.opts);
+                    } else {
+                        fs::create_directories(filepath.main / f.filename());
+                        fs::copy(f, filepath.main / f.filename(), copying.opts);
+                    }
+                    successes.directories++;
+                } else {
+                    fs::copy(f, filepath.main / f.filename(), use_regular_copy ? copying.opts : copying.opts | fs::copy_options::create_hard_links);
+                    successes.files++;
+                }
+                if (action == Action::Cut) {
+                    originalFiles << fs::absolute(f).string() << std::endl;
+                }
+            };
+            try {
+                copyItem();
+            } catch (const fs::filesystem_error& e) {
+                if (!copying.use_safe_copy) {
+                    try {
+                        copyItem(true);
+                    } catch (const fs::filesystem_error& e) {
+                        copying.failedItems.emplace_back(f.string(), e.code());
+                    }
+                } else {
+                    copying.failedItems.emplace_back(f.string(), e.code());
+                }
+            }
+        }
+    }
 
-    action_shortcuts[Action::Cut] = "ks";
-    action_shortcuts[Action::Copy] = "kp";
-    action_shortcuts[Action::Paste] = "y";
-    action_shortcuts[Action::PipeIn] = "iy";
-    action_shortcuts[Action::PipeOut] = "dy";
-    action_shortcuts[Action::Clear] = "tmz";
-    action_shortcuts[Action::Show] = "go";
+    void paste() {
+        int user_decision = 0;
+        for (const auto& f : fs::directory_iterator(filepath.main)) {
+            auto pasteItem = [&](const bool use_regular_copy = copying.use_safe_copy) {
+                if (fs::exists(fs::current_path() / f.path().filename()) && fs::equivalent(f, fs::current_path() / f.path().filename())) {
+                    if (fs::is_directory(f)) {
+                        successes.directories++;
+                    } else {
+                        successes.files++;
+                    }
+                    return;
+                }
+                if (fs::is_directory(f)) {
+                    fs::copy(f, fs::current_path() / f.path().filename(), copying.opts);
+                    successes.directories++;
+                } else {
+                    fs::copy(f, fs::current_path() / f.path().filename(), use_regular_copy ? copying.opts : copying.opts | fs::copy_options::create_hard_links);
+                    successes.files++;
+                }
+            };
+            try {
+                if (fs::exists(fs::current_path() / f.path().filename())) {
+                    switch (user_decision) {
+                        case -2:
+                            break;
+                        case -1:
+                        case 0:
+                        case 1:
+                            stopIndicator();
+                            user_decision = getUserDecision(f.path().filename().string());
+                            startIndicator();
+                            break;
+                        case 2:
+                            pasteItem();
+                            break;
+                    }
+                    switch (user_decision) {
+                        case -1:
+                            break;
+                        case 1:
+                            pasteItem();
+                    }
+                } else {
+                    pasteItem();
+                }
+            } catch (const fs::filesystem_error& e) {
+                if (!copying.use_safe_copy) {
+                    try {
+                        pasteItem(true);
+                    } catch (const fs::filesystem_error& e) {
+                        copying.failedItems.emplace_back(f.path().filename().string(), e.code());
+                    }
+                } else {
+                    copying.failedItems.emplace_back(f.path().filename().string(), e.code());
+                }
+            }
+        }
+        removeOldFiles();
+    }
 
-    doing_action[Action::Cut] = "Kesiliyor";
-    doing_action[Action::Copy] = "Kopyalanıyor";
-    doing_action[Action::Paste] = "Yapıştırılıyor";
-    doing_action[Action::PipeIn] = "İçe Yönlendiriliyor";
-    doing_action[Action::PipeOut] = "Dışa Yönlendiriliyor";
+    void pipeIn() {
+        std::ofstream file(filepath.main / constants.pipe_file);
+        std::string line;
+        while (std::getline(std::cin, line)) {
+            successes.bytes += line.size() + 1;
+            copying.buffer.append(line + "\n");
+            if (copying.buffer.size() >= 32000000) {
+                file << copying.buffer;
+                copying.buffer.clear();
+            }
+        }
+        file << copying.buffer;
+    }
 
-    did_action[Action::Cut] = "Kesildi";
-    did_action[Action::Copy] = "Kopyalandı";
-    did_action[Action::Paste] = "Yapıştırıldı";
-    did_action[Action::PipeIn] = "İçe Yönlendirildi";
-    did_action[Action::PipeOut] = "Dışa Yönlendirildi";
+    void pipeOut() {
+        std::string line;
+        for (const auto& entry : fs::recursive_directory_iterator(filepath.main)) {
+            std::ifstream file(entry.path());
+            while (std::getline(file, line)) {
+                printf("%s\n", line.data());
+                successes.bytes += line.size() + 1;
+            }
+            file.close();
+        }
+    }
 
-    help_message = "{blue}▏Clipboard %s, komut satırı için, kesme, kopyalama ve yapıştırma sistemidir.{blank}\n"
-                   "{blue}{bold}▏Nasıl kullanılır{blank}\n"
-                   "{orange}▏clipboard kes (öğe) [öğeler]{blank} {pink}(Bu öğe(leri) keser.){blank}\n"
-                   "{orange}▏clipboard kopyala (öğe) [öğeler]{blank} {pink}(Bu öğe(leri) kopyalar.){blank}\n"
-                   "{orange}▏clipboard yapistir{blank} {pink}(Bu panodakileri yapıştırır.){blank}\n"
-                   "{orange}▏clipboard goster{blank} {pink}(Bu panoda olan öğeleri gösterir.){blank}\n"
-                   "{orange}▏clipboard temizle{blank} {pink}(Bu pano içerğini temizler.){blank}\n"
-                   "{blue}▏İşlemlerde uzun uzun yazarak zaman kaybetmemek için \"clipboard\" yerine \"cb\" kullanarak kısaltabilirsiniz.{blank}\n"
-                   "{blue}▏    Ben ise \"pano\" ismini kullanmanızı öneririm :){blank}\n"
-                   "{blue}▏Ayrıca kommutun sonuna bir sayı ekleyerek 10 farklı panodan birisini seçebilirsiniz.{blank}\n"
-                   "{blue}{bold}▏Örnekler{blank}\n"
-                   "{orange}▏pano ks Nükleer_Fırlatma_Kodları.txt kişilerklasörü{blank} {pink}(Bu verilen öğeleri öntanımlı 0. panoya keser){blank}\n"
-                   "{orange}▏pano kp1 mama.conf{blank} {pink}(Bu verilen öğeleri 1. panoya kopyalar.){blank}\n"
-                   "{orange}▏pano y1{blank} {pink}(Bu 1. panodakileri yapıştırır){blank}\n"
-                   "{orange}▏pano go4{blank} {pink}(Bu 4. pano içeriğini gösterir, 4.){blank}\n"
-                   "{orange}▏pano tmz{blank} {pink}(Bu öntanımlı panonun içeriğini temizler.){blank}\n"
-                   "{blue}▏Bu yardım ekranını herhangi bir zaman şu komutlardan birisiyle görebilirsiniz:{blank}\n"
-                   "{blue}▏    {bold}clipboard -h{blank}{blue}, {bold}clipboard --help{blank}{blue}, ya da{bold} clipboard help{blank}{blue}.\n"
-                   "{blue}▏Discord sunucumuzdan daha fazla yardım alabilirsiniz: {bold}https://discord.gg/J6asnc3pEG{blank}\n"
-                   "{blue}▏Copyright (C) 2022 Jackson Huff. Licensed under the GPLv3.{blank}\n"
-                   "{blue}▏                                 GPLv3 altında lisanslanmıştır.{blank}\n"
-                   "{blue}▏Bu program KESİNLİKLE HİÇBİR GARANTİ ile birlikte gelir. Bu ücretsiz bir yazılımdır ve belirli koşullar altında yeniden dağıtabilirsiniz.{blank}\n";
-    check_clipboard_status_message = "{blue}• Pano içeriği şunlardır:\n";
-    clipboard_item_contents_message = "{blue}• {bold}%s{blank}{blue} panoda bulunan ilk {bold}%i{blank}{blue} öğe: {blank}\n";
-    no_clipboard_contents_message = "{blue}• Panoda hiçbir şey yok.{blank}\n";
-    clipboard_action_prompt = "{pink}Başlamak için sonuna {bold}kes, kopyala, {blank}{pink}veya{bold} yapistir{blank}{pink} ekleyin, {bold}clipboard kopyala{blank}{pink} gibi, veya yardıma ihtiyacın olursa yardım ekranını göstermek için {bold}clipboard -h{blank}{pink}'i dene.{blank}\n";
-    no_valid_action_message = "{red}╳ Geçerli bir işlem vermediniz (\"%s\") veya işlem vermeyi unuttunuz {pink}Komutunuza {bold}cut, copy, {blank}{pink}ya da {bold}paste{blank}{pink} eklemelisiniz, örneğin {bold}clipboard copy.{blank}\n";
-    choose_action_items_message = "{red}╳ %s(ma/me) işlemi için bir öğe seçmeniz gerekmektedir.{pink} %s işleminden sonra öğeler eklemeyi deneyiniz, örneğin {bold}clipboard %s contacts.txt myprogram.cpp{blank}\n";
-    fix_redirection_action_message = "{red}╳ {bold}%s{blank}{red}(ma/me) işlemini burada yeniden yönlendirme ile kullanamazsın. {pink} {bold}%s{blank}{pink} işlemini silin veya {bold}%s{blank}{pink} işlemini kullanın, örneğin {bold}clipboard %s{blank}{pink}.\n";
-    redirection_no_items_message = "{red}╳ Yeniden yönlendirme işlemi yaparken öğe veremezsiniz. {pink}{bold}clipboard [action]{blank}{pink}'dan sonra  gelen öğeleri siliniz.\n";
-    paste_success_message = "{green}✓ Yapıştırma başarıyla tamamlandı{blank}\n";
-    clear_success_message = "{green}✓ Pano temizlendi{blank}\n";
-    clear_fail_message = "{red}╳ Pano temizlenemedi{blank}\n";
-    clipboard_failed_message = "{red}╳ %s(ma/me) işlemi şu öğeler için başarısız oldu:{blank}\n";
-    and_more_fails_message = "{red}▏ ...ve {bold}%i{blank}{red} fazla.{blank}\n";
-    and_more_items_message = "{blue}▏ ...ve {bold}%i{blank}{blue} fazla.{blank}\n";
-    fix_problem_message = "{pink}▏ Erişime ihtiyacınız varsa şuna bakın, veya\n"
-                          "▏ bulunduğunuz dizini veya girdiğiniz dosya isimlerini ikinci kez kontrol edin.{blank}\n";
-    not_enough_storage_message = "{red}╳ Bütün öğelerinizi yapıştırabileceğin kadar yeterli bir alanınız yok (%gkB yapıştırılacak, %gkB boş).{blank}{pink} Hangi öğeleri seçtiğinizi ikinci kez kontrol etmeyi deneyin veya yer açmak için bazı dosyaları silin.{blank}\n";
-    pipe_success_message = "{green}✓ %s %i bayt{blank}\n";
-    multiple_files_success_message = "{green}✓ %s %i dosya{blank}\n";
-    multiple_directories_success_message = "{green}✓ %s %i dizin{blank}\n";
-    multiple_files_directories_success_message = "{green}✓ %s %i dosya ve %i dizin{blank}\n";
-    internal_error_message = "{red}╳ İçsel hata: %s\n▏ Bu yüksek ihtimal bir hata veya bu sistemde erişim sorunu yaşıyorsunuz.{blank}\n";
+    void clear() {
+        if (fs::is_empty(filepath.main)) {
+            printf("%s", replaceColors(clear_success_message).data());
+        } else {
+            printf("%s", replaceColors(clear_fail_message).data());
+        }
+    }
+
+    void show() {
+        stopIndicator();
+        if (fs::is_directory(filepath.main) && !fs::is_empty(filepath.main)) {
+            std::pair<int, int> termSpaceRemaining(terminalSize());
+            if (fs::is_regular_file(filepath.main / constants.pipe_file)) {
+                std::string content;
+                std::ifstream input(filepath.main / constants.pipe_file);
+                std::stringstream buffer;
+                buffer << input.rdbuf();
+                content = buffer.str();
+                content.erase(std::remove(content.begin(), content.end(), '\n'), content.end());
+                printf(replaceColors(clipboard_text_contents_message).data(), std::min(static_cast<unsigned int>(250), static_cast<unsigned int>(content.size())), clipboard_name.data());
+                printf(replaceColors("{bold}{blue}%s\n{blank}").data(), content.substr(0, 250).data());
+                if (content.size() > 250) {
+                    printf(replaceColors(and_more_items_message).data(), content.size() - 250);
+                }
+                return;
+            }
+            unsigned int total_items = 0;
+            for (const auto& entry : fs::directory_iterator(filepath.main)) {
+                total_items++;
+            }
+            unsigned int rowsAvailable = termSpaceRemaining.second - ((replaceColors(clipboard_item_contents_message).length() / termSpaceRemaining.first) + 3);
+            printf(replaceColors(clipboard_item_contents_message).data(), std::min(rowsAvailable, total_items), clipboard_name.data());
+            auto it = fs::directory_iterator(filepath.main);
+            for (int i = 0; i < std::min(rowsAvailable, total_items); i++) {
+
+                printf(replaceColors("{blue}▏ {bold}{pink}%s{blank}\n").data(), it->path().filename().string().data());
+
+                if (i == rowsAvailable - 1 && total_items > rowsAvailable) {
+                    printf(replaceColors(and_more_items_message).data(), total_items - rowsAvailable);
+                }
+
+                it++;
+
+            }
+        } else {
+            printf(replaceColors(no_clipboard_contents_message).data(), actions[Action::Cut].data(), actions[Action::Copy].data(), actions[Action::Paste].data(), actions[Action::Copy].data());
+        }
+    }
+
+    void edit() {
+        
+    }
+}
+
+std::string replaceColors(const std::string_view& str) {
+    std::string temp(str); //a string to do scratch work on
+    for (const auto& key : colors) { //iterate over all the possible colors to replace
+        for (int i = 0; (i = temp.find(key.first, i)) != std::string::npos; i += key.second.length()) {
+            temp.replace(i, key.first.length(), key.second);
+        }
+    }
+    return temp;
+}
+
+void clearTempDirectory(bool force_clear = false) {
+    if (force_clear || (action != Action::Paste && action != Action::PipeOut && action != Action::Show)) {
+        fs::remove(filepath.original_files);
+        for (const auto& entry : fs::directory_iterator(filepath.main)) {
+            fs::remove_all(entry.path());
+        }
+    }
+}
+
+void convertFromGUIClipboard(const std::string& text) {
+    clearTempDirectory(true);
+    std::ofstream output(filepath.main / constants.pipe_file);
+    output << text;
+}
+
+void convertFromGUIClipboard(const ClipboardPaths& clipboard) {
+    // Only clear the temp directory if all files in the clipboard are outside the temp directory
+    // This avoids the situation where we delete the very files we're trying to copy
+    auto allOutsideFilepath = std::all_of(clipboard.paths().begin(), clipboard.paths().end(), [](auto& path) {
+        auto relative = fs::relative(path, filepath.main);
+        auto firstElement = *(relative.begin());
+        return firstElement == fs::path("..");
+    });
+
+    if (allOutsideFilepath) {
+        clearTempDirectory(true);
+    }
+
+    for (auto&& path : clipboard.paths()) {
+        if (!fs::exists(path)) {
+            continue;
+        }
+
+        auto target = filepath.main / path.filename();
+        if (fs::exists(target) && fs::equivalent(path, target)) {
+            continue;
+        }
+
+        try {
+            fs::copy(path, target, copying.opts | fs::copy_options::create_hard_links);
+        } catch (const fs::filesystem_error& e) {
+            try {
+                fs::copy(path, target, copying.opts);
+            } catch (const fs::filesystem_error& e) {} // Give up
+        }
+    }
+
+    if (clipboard.action() == ClipboardPathsAction::Cut) {
+        std::ofstream originalFiles { filepath.original_files };
+        for (auto&& path : clipboard.paths()) {
+            originalFiles << path.string() << std::endl;
+        }
+    }
+}
+
+ClipboardContent getThisClipboard() {
+    if (fs::exists(filepath.original_files)) {
+        std::ifstream originalFiles { filepath.original_files };
+        std::vector<fs::path> files;
+
+        std::string line;
+        while (!originalFiles.eof()) {
+            std::getline(originalFiles, line);
+            if (!line.empty()) {
+                files.emplace_back(line);
+            }
+        }
+
+        return { std::move(files), ClipboardPathsAction::Cut };
+    }
+
+    if (!copying.buffer.empty()) {
+        return { copying.buffer };
+    }
+
+    if (!copying.items.empty()) {
+        std::vector<fs::path> paths;
+
+        for (const auto& entry : fs::directory_iterator(filepath.main)) { //count all items which were actually successfully actioned on
+            paths.push_back(entry.path());
+        }
+
+        return ClipboardContent(ClipboardPaths(std::move(paths)));
+    }
+
+    return {};
+}
+
+void setupHandlers() {
+    signal(SIGINT, [](int dummy) {
+        if (!stopIndicator(false)) {
+            // Indicator thread is not currently running. TODO: Write an unbuffered newline, and maybe a cancelation message, directly to standard error. Note: There is no standard C++ interface for this, so this requires an OS call.
+            _exit(EXIT_FAILURE);
+        }
+    });
+    atexit([]() {
+        //stopIndicator();
+    });
+}
+
+void setLocale() {
+    try {
+        if (std::locale("").name().substr(0, 2) == "es") {
+            setLanguageES();
+        } else if (std::locale("").name().substr(0, 2) == "pt") {
+            setLanguagePT();
+        } else if (std::locale("").name().substr(0, 2) == "tr") {
+            setLanguageTR();
+        }
+    } catch (...) {}
+}
+
+void showHelpMessage(int& argc, char *argv[]) {
+    for (int i = 1; i < argc && strcmp(argv[i], "--"); i++) {
+        if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help") || (argc >= 2 && !strcmp(argv[1], "help"))) {
+            printf(replaceColors(help_message).data(), constants.clipboard_version.data());
+            exit(EXIT_SUCCESS);
+        }
+    }
+}
+
+void setupItems(int& argc, char *argv[]) {
+    for (int i = 1; i < argc; i++) {
+        copying.items.push_back(argv[i]);
+    }
+}
+
+void setClipboardName(int& argc, char *argv[]) {
+    if (argc >= 2) {
+        clipboard_name = argv[1];
+        if (clipboard_name.find_first_of("_") != std::string::npos) {
+            clipboard_name = clipboard_name.substr(clipboard_name.find_first_of("_") + 1);
+            copying.is_persistent = true;
+        } else {
+            clipboard_name = clipboard_name.substr(clipboard_name.find_last_not_of("0123456789") + 1);
+        }
+        if (clipboard_name.empty()) {
+            clipboard_name = constants.default_clipboard_name;
+        } else {
+            argv[1][strlen(argv[1]) - (clipboard_name.length() + copying.is_persistent)] = '\0';
+        }
+    }
+
+    if (argc >= 3) {
+        if (!strcmp(argv[2], "-c") && argc >= 4) {
+            clipboard_name = argv[3];
+            for (int i = 2; i < argc - 2; i++) {
+                argv[i] = argv[i + 2];
+            }
+            argc -= 2;
+        } else if (!strncmp(argv[2], "--clipboard=", 12)) {
+            clipboard_name = argv[2] + 12;
+            for (int i = 2; i < argc - 1; i++) {
+                argv[i] = argv[i + 1];
+            }
+            argc -= 1;
+        }
+    }
+
+    filepath.temporary = (getenv("CLIPBOARD_TMPDIR") ? getenv("CLIPBOARD_TMPDIR") : getenv("TMPDIR") ? getenv("TMPDIR") : fs::temp_directory_path()) / constants.temporary_directory_name / clipboard_name;
+
+    filepath.persistent = (getenv("CLIPBOARD_PERSISTDIR") ? getenv("CLIPBOARD_PERSISTDIR") : (getenv("XDG_CACHE_HOME") ? getenv("XDG_CACHE_HOME") : filepath.home)) / constants.persistent_directory_name / clipboard_name;
+    
+    filepath.main = (copying.is_persistent || getenv("CLIPBOARD_ALWAYS_PERSIST")) ? filepath.persistent : filepath.temporary;
+
+    filepath.original_files = filepath.main.parent_path() / (clipboard_name + std::string(constants.original_files_extension));
+}
+
+void setupVariables(int& argc, char *argv[]) {
+    is_tty.std_in = isatty(fileno(stdin));
+    is_tty.std_out = isatty(fileno(stdout));
+    is_tty.std_err = isatty(fileno(stderr));
+
+    if (getenv("IS_ACTUALLY_A_TTY")) { //add test compatibility where isatty returns false, but there is actually a tty
+        is_tty.std_in = true;
+        is_tty.std_out = true;
+        is_tty.std_err = true;
+    }
+
+    #if defined(_WIN64) || defined (_WIN32)
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE); //Windows terminal color compatibility
+	DWORD dwMode = 0;
+	GetConsoleMode(hOut, &dwMode);
+	if (!SetConsoleMode(hOut, (dwMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT))) {
+        for (auto& key : colors) {
+            key.second = "";
+        }
+	}
+	SetConsoleOutputCP(CP_UTF8); //fix broken accents on Windows
+
+    filepath.home = getenv("USERPROFILE");
+    #else
+    filepath.home = getenv("HOME");
+    #endif
+
+    if (getenv("NO_COLOR") && !getenv("FORCE_COLOR")) {
+        for (auto& key : colors) {
+            key.second = "";
+        }
+    }
+}
+
+void createTempDirectory() {
+    fs::create_directories(filepath.temporary);
+    fs::create_directories(filepath.persistent);
+}
+
+void syncWithGUIClipboard() {
+    if (clipboard_name == constants.default_clipboard_name && !getenv("CLIPBOARD_NOGUI")) {
+        ClipboardContent guiClipboard = getGUIClipboard();
+        if (guiClipboard.type() == ClipboardContentType::Text) {
+            convertFromGUIClipboard(guiClipboard.text());
+        } else if (guiClipboard.type() == ClipboardContentType::Paths) {
+            convertFromGUIClipboard(guiClipboard.paths());
+        }
+    }
+}
+
+void showClipboardStatus() {
+    std::vector<std::pair<fs::path, bool>> clipboards_with_contents;
+    auto iterateClipboards = [&](const fs::path& path, bool persistent) { //use zip ranges here when gcc 13 comes out
+        for (const auto& entry : fs::directory_iterator(path)) {
+            if (fs::is_directory(entry) && !fs::is_empty(entry)) {
+                clipboards_with_contents.push_back({entry.path(), persistent});
+            }
+        }
+    };
+    iterateClipboards(filepath.temporary.parent_path(), false);
+    iterateClipboards(filepath.persistent.parent_path(), true);
+    std::sort(clipboards_with_contents.begin(), clipboards_with_contents.end());
+    if (clipboards_with_contents.empty()) {
+        printf("%s", replaceColors(no_clipboard_contents_message).data());
+    } else {
+        std::pair<int, int> termSizeAvailable(terminalSize());
+
+        termSizeAvailable.second -= (replaceColors(clipboard_action_prompt).size() / termSizeAvailable.first) + 1;
+        termSizeAvailable.second -= (replaceColors(check_clipboard_status_message).size() / termSizeAvailable.first) + 1;
+        if (clipboards_with_contents.size() > termSizeAvailable.second) {
+            termSizeAvailable.second -= (replaceColors(and_more_items_message).size() / termSizeAvailable.first) + 1;
+        }
+
+        printf("%s", replaceColors(check_clipboard_status_message).data());
+
+        for (int clipboard = 0; clipboard < std::min(static_cast<int>(clipboards_with_contents.size()), termSizeAvailable.second); clipboard++) {
+
+            int widthRemaining = termSizeAvailable.first - (clipboards_with_contents.at(clipboard).first.filename().string().length() + 4 + std::string_view(clipboards_with_contents.at(clipboard).second ? " (p)" : "").length());
+            printf(replaceColors("{bold}{blue}▏ %s%s: {blank}").data(), clipboards_with_contents.at(clipboard).first.filename().string().data(), clipboards_with_contents.at(clipboard).second ? " (p)" : "");
+
+            if (fs::is_regular_file(clipboards_with_contents.at(clipboard).first / constants.pipe_file)) {
+                std::string content;
+                std::ifstream input(clipboards_with_contents.at(clipboard).first / constants.pipe_file);
+                std::stringstream buffer;
+                buffer << input.rdbuf();
+                content = buffer.str();
+                content.erase(std::remove(content.begin(), content.end(), '\n'), content.end());
+                printf(replaceColors("{pink}%s{blank}").data(), content.substr(0, widthRemaining).data());
+                continue;
+            }
+
+            for (bool first = true; const auto& entry : fs::directory_iterator(clipboards_with_contents.at(clipboard).first)) {
+                int entryWidth = entry.path().filename().string().length();
+
+                if (widthRemaining <= 0) {
+                    break;
+                }
+
+                if (!first) {
+                    if (entryWidth <= widthRemaining - 2) {
+                        printf("%s", replaceColors("{pink}, {blank}").data());
+                        widthRemaining -= 2;
+                    }
+                }
+
+                if (entryWidth <= widthRemaining) {
+                    printf(replaceColors("{pink}%s{blank}").data(), entry.path().filename().string().data());
+                    widthRemaining -= entryWidth;
+                    first = false;
+                }
+            }
+            printf("\n");
+        }
+        if (clipboards_with_contents.size() > termSizeAvailable.second) {
+            printf(replaceColors(and_more_items_message).data(), clipboards_with_contents.size() - termSizeAvailable.second);
+        }
+    }
+    printf("%s", replaceColors(clipboard_action_prompt).data());
+}
+
+void setupAction(int& argc, char *argv[]) {
+    auto flagIsPresent = [&](const std::string_view& flag, const std::string_view& shortcut = ""){
+        for (int i = 1; i < argc && strcmp(argv[i], "--"); i++) {
+            if (!strcmp(argv[i], flag.data()) || !strcmp(argv[i], (std::string(shortcut).append(flag)).data())) {
+                for (int j = i; j < argc - 1; j++) {
+                    argv[j] = argv[j + 1];
+                }
+                argc--;
+                return true;
+            }
+        }
+        return false;
+    };
+    if (argc >= 2) {
+        if (flagIsPresent(actions[Action::Cut], "--") || flagIsPresent(action_shortcuts[Action::Cut], "-")) { //replace with join_with_view when C++23 becomes available
+            action = Action::Cut;
+            if (!is_tty.std_in || !is_tty.std_out) {
+                fprintf(stderr, replaceColors(fix_redirection_action_message).data(), actions[action].data(), actions[action].data(), actions[Action::Copy].data(), actions[Action::Copy].data());
+                exit(EXIT_FAILURE);
+            }
+        } else if (flagIsPresent(actions[Action::Copy], "--") || flagIsPresent(action_shortcuts[Action::Copy], "-")) {
+            action = Action::Copy;
+            if (!is_tty.std_in) {
+                action = Action::PipeIn;
+            } else if (!is_tty.std_out) {
+                fprintf(stderr, replaceColors(fix_redirection_action_message).data(), actions[action].data(), actions[action].data(), actions[Action::Paste].data(), actions[Action::Paste].data());
+                exit(EXIT_FAILURE);
+            }
+        } else if (flagIsPresent(actions[Action::Paste], "--") || flagIsPresent(action_shortcuts[Action::Paste], "-")) {
+            action = Action::Paste;
+            if (!is_tty.std_out) {
+                action = Action::PipeOut;
+            } else if (!is_tty.std_in) {
+                fprintf(stderr, replaceColors(fix_redirection_action_message).data(), actions[action].data(), actions[action].data(), actions[Action::Copy].data(), actions[Action::Copy].data());
+                exit(EXIT_FAILURE);
+            }
+        } else if (flagIsPresent(actions[Action::Show], "--") || flagIsPresent(action_shortcuts[Action::Show], "-")) {
+            action = Action::Show;
+        } else if (flagIsPresent(actions[Action::Clear], "--") || flagIsPresent(action_shortcuts[Action::Clear], "-")) {
+            action = Action::Clear;
+            if (!is_tty.std_in) {
+                fprintf(stderr, replaceColors(fix_redirection_action_message).data(), actions[action].data(), actions[action].data(), actions[Action::Cut].data(), actions[Action::Cut].data());
+                exit(EXIT_FAILURE);
+            } else if (!is_tty.std_out) {
+                fprintf(stderr, replaceColors(fix_redirection_action_message).data(), actions[action].data(), actions[action].data(), actions[Action::Paste].data(), actions[Action::Paste].data());
+                exit(EXIT_FAILURE);
+            }
+        } else if (flagIsPresent(actions[Action::Edit], "--"), flagIsPresent(action_shortcuts[Action::Edit])) {
+            action = Action::Edit;
+        } else if (flagIsPresent("ee")) {
+            printf("%s", replaceColors("{bold}{blue}https://youtu.be/Lg_Pn45gyMs\n{blank}").data());
+            exit(EXIT_SUCCESS);
+        } else {
+            printf(replaceColors(no_valid_action_message).data(), argv[1]);
+            exit(EXIT_FAILURE);
+        }
+        if (flagIsPresent("--fast-copy") || flagIsPresent("-fc")) {
+            copying.use_safe_copy = false;
+        }
+        for (int i = 1; i < argc; i++) {
+            if (!strcmp(argv[i], "--")) {
+                for (int j = i; j < argc; j++) {
+                    argv[j] = argv[j + 1];
+                }
+                argc--;
+                break;
+            }
+        }
+    } else if (!is_tty.std_in) {
+        action = Action::PipeIn;
+    } else if (!is_tty.std_out) {
+        action = Action::PipeOut;
+    } else {
+        showClipboardStatus();
+        exit(EXIT_SUCCESS);
+    }
+    if (action == Action::PipeIn || action == Action::PipeOut) {
+        if (argc >= 3) {
+            fprintf(stderr, "%s", replaceColors(redirection_no_items_message).data());
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
+void checkForNoItems() {
+    if ((action == Action::Cut || action == Action::Copy) && copying.items.size() < 1) {
+        printf(replaceColors(choose_action_items_message).data(), actions[action].data(), actions[action].data(), actions[action].data());
+        exit(EXIT_FAILURE);
+    }
+    if (action == Action::Paste && fs::is_empty(filepath.main)) {
+        showClipboardStatus();
+        exit(EXIT_SUCCESS);
+    }
+}
+
+void setupIndicator() {
+    std::unique_lock<std::mutex> lock(m);
+    int output_length = 0;
+    const std::array<std::string_view, 10> spinner_steps{"━       ", "━━      ", " ━━     ", "  ━━    ", "   ━━   ", "    ━━  ", "     ━━ ", "      ━━", "       ━", "        "};
+    static unsigned int percent_done = 0;
+    if ((action == Action::Cut || action == Action::Copy) && is_tty.std_err) {
+        static unsigned long items_size = copying.items.size();
+        for (int i = 0; spinner_state == SpinnerState::Active; i == 9 ? i = 0 : i++) {
+            percent_done = ((successes.files + successes.directories + copying.failedItems.size()) * 100) / items_size;
+            output_length = fprintf(stderr, replaceColors(working_message).data(), doing_action[action].data(), percent_done, "%", spinner_steps.at(i).data());
+            fflush(stderr);
+            cv.wait_for(lock, std::chrono::milliseconds(50), [&]{ return spinner_state != SpinnerState::Active; });
+        }
+    } else if ((action == Action::PipeIn || action == Action::PipeOut) && is_tty.std_err) {
+        for (int i = 0; spinner_state == SpinnerState::Active; i == 9 ? i = 0 : i++) {
+            output_length = fprintf(stderr, replaceColors(working_message).data(), doing_action[action].data(), static_cast<int>(successes.bytes), "B", spinner_steps.at(i).data());
+            fflush(stderr);
+            cv.wait_for(lock, std::chrono::milliseconds(50), [&]{ return spinner_state != SpinnerState::Active; });
+        }
+    } else if (action == Action::Paste && is_tty.std_err) {
+        static unsigned long items_size = 0;
+        if (items_size == 0) {
+            for (const auto& f : fs::directory_iterator(filepath.main)) {
+                items_size++;
+            }
+            if (items_size == 0) {
+                items_size = 1;
+            }
+        }
+        for (int i = 0; spinner_state == SpinnerState::Active; i == 9 ? i = 0 : i++) {
+            percent_done = ((successes.files + successes.directories + copying.failedItems.size()) * 100) / items_size;
+            output_length = fprintf(stderr, replaceColors(working_message).data(), doing_action[action].data(), percent_done, "%", spinner_steps.at(i).data());
+            fflush(stderr);
+            cv.wait_for(lock, std::chrono::milliseconds(50), [&]{ return spinner_state != SpinnerState::Active; });
+        }
+    } else if (is_tty.std_err) {
+        while (spinner_state == SpinnerState::Active) {
+            output_length = fprintf(stderr, replaceColors(working_message).data(), doing_action[action].data(), 0, "%", "");
+            fflush(stderr);
+            cv.wait_for(lock, std::chrono::milliseconds(50), [&]{ return spinner_state != SpinnerState::Active; });
+        }
+    }
+    if (is_tty.std_err) {
+        fprintf(stderr, "\r%*s\r", output_length, "");
+    }
+    if (spinner_state == SpinnerState::Cancel) {
+        fprintf(stderr, replaceColors(cancelled_message).data(), actions[action].data());
+        fflush(stderr);
+        _exit(EXIT_FAILURE);
+    }
+    fflush(stderr);
+}
+
+void startIndicator() { // If cancelled, leave cancelled
+    SpinnerState expect = SpinnerState::Done;
+    spinner_state.compare_exchange_strong(expect, SpinnerState::Active);
+    indicator = std::thread(setupIndicator);
+}
+
+void deduplicateItems() {
+    std::sort(copying.items.begin(), copying.items.end());
+    copying.items.erase(std::unique(copying.items.begin(), copying.items.end()), copying.items.end());
+}
+
+unsigned long long totalItemSize() {
+    unsigned long long total_item_size = 0;
+    for (const auto& i : copying.items) {
+        try {
+            if (fs::is_directory(i)) {
+                for (const auto& entry : fs::recursive_directory_iterator(i)) {
+                    if (fs::is_regular_file(entry)) {
+                        total_item_size += fs::file_size(entry);
+                    } else {
+                        total_item_size += 16;
+                    }
+                }
+            } else if (fs::is_regular_file(i)) {
+                total_item_size += fs::file_size(i);
+            } else {
+                total_item_size += 16;
+            }
+        } catch (const fs::filesystem_error& e) {
+            copying.failedItems.emplace_back(i.string(), e.code());
+        }
+    }
+    return total_item_size;
+}
+
+void checkItemSize() {
+    if (action == Action::Cut || action == Action::Copy) {
+        unsigned long long total_item_size = totalItemSize();
+        const unsigned long long space_available = fs::space(filepath.main).available;
+        if (total_item_size > (space_available / 2)) {
+            stopIndicator();
+            fprintf(stderr, replaceColors(not_enough_storage_message).data(), total_item_size / 1024.0, space_available / 1024.0);
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
+void removeOldFiles() {
+    if (fs::is_regular_file(filepath.original_files)) {
+        std::ifstream files(filepath.original_files);
+        std::string line;
+        while (std::getline(files, line)) {
+            try {
+                fs::remove_all(line);
+            } catch (const fs::filesystem_error& e) {
+                copying.failedItems.emplace_back(line, e.code());
+            }
+        }
+        files.close();
+        if (copying.failedItems.empty()) {
+            fs::remove(filepath.original_files);
+        }
+        action = Action::Cut;
+    }
+}
+
+bool userIsARobot() {
+    return !is_tty.std_err || !is_tty.std_in || !is_tty.std_out || getenv("CI");
+}
+
+int getUserDecision(const std::string& item) {
+    if (userIsARobot()) {
+        return 2;
+    }
+    fprintf(stderr, replaceColors(item_already_exists_message).data(), item.data());
+    std::string decision;
+    while (true) {
+        std::getline(std::cin, decision);
+        fprintf(stderr, "%s", replaceColors("{blank}").data());
+        if (decision == "y" || decision == "yes") {
+            return 1;
+        } else if (decision == "ya" || decision == "yesall") {
+            return 2;
+        } else if (decision == "n" || decision == "no") {
+            return -1;
+        } else if (decision == "na" || decision == "noall") {
+            return -2;
+        } else {
+            fprintf(stderr, "%s", replaceColors(bad_response_message).data());
+        }
+    }
+}
+
+void performAction() {
+    switch (action) {
+        case Action::Copy:
+        case Action::Cut:
+            PerformAction::copy();
+            break;
+        case Action::Paste:
+            PerformAction::paste();
+            break;
+        case Action::PipeIn:
+            PerformAction::pipeIn();
+            break;
+        case Action::PipeOut:
+            PerformAction::pipeOut();
+            break;
+        case Action::Clear:
+            PerformAction::clear();
+            break;
+        case Action::Show:
+            PerformAction::show();
+            break;
+        case Action::Edit:
+            PerformAction::edit();
+            break;
+    }
+}
+
+void updateGUIClipboard() {
+    if ((action == Action::Cut || action == Action::Copy || action == Action::PipeIn || action == Action::Clear) && !getenv("CLIPBOARD_NOGUI")) { //only update GUI clipboard on write operations
+        ClipboardContent thisClipboard = getThisClipboard();
+        writeToGUIClipboard(thisClipboard);
+    }
+}
+
+void showFailures() {
+    if (copying.failedItems.size() > 0) {
+        printf(replaceColors(clipboard_failed_message).data(), actions[action].data());
+        for (int i = 0; i < std::min(5, static_cast<int>(copying.failedItems.size())); i++) {
+            printf(replaceColors("{red}▏ {bold}%s{blank}{red}: %s{blank}\n").data(), copying.failedItems.at(i).first.data(), copying.failedItems.at(i).second.message().data());
+            if (i == 4 && copying.failedItems.size() > 5) {
+                printf(replaceColors(and_more_fails_message).data(), int(copying.failedItems.size() - 5));
+            }
+        }
+        printf("%s", replaceColors(fix_problem_message).data());
+    }
+}
+
+void showSuccesses() {
+    if (action == Action::PipeIn || action == Action::PipeOut && is_tty.std_err) {
+        fprintf(stderr, replaceColors(pipe_success_message).data(), did_action[action].data(), static_cast<int>(successes.bytes));
+        return;
+    }
+    if ((successes.files == 1 && successes.directories == 0) || (successes.files == 0 && successes.directories == 1)) {
+        printf(replaceColors(one_item_success_message).data(), did_action[action].data(), action == Action::Paste ? (*(fs::directory_iterator(filepath.main))).path().filename().string().data() : copying.items.at(0).string().data());
+    } else {
+        if ((successes.files > 1) && (successes.directories == 0)) {
+            printf(replaceColors(multiple_files_success_message).data(), did_action[action].data(), static_cast<int>(successes.files));
+        } else if ((successes.files == 0) && (successes.directories > 1)) {
+            printf(replaceColors(multiple_directories_success_message).data(), did_action[action].data(), static_cast<int>(successes.directories));
+        } else if ((successes.files >= 1) && (successes.directories >= 1)) {
+            printf(replaceColors(multiple_files_directories_success_message).data(), did_action[action].data(), static_cast<int>(successes.files), static_cast<int>(successes.directories));
+        }
+    }
+}
+
+int main(int argc, char *argv[]) {
+    try {
+        setupHandlers();
+
+        setupVariables(argc, argv);
+
+        setLocale();
+
+        setClipboardName(argc, argv);
+
+        showHelpMessage(argc, argv);
+
+        createTempDirectory();
+
+        syncWithGUIClipboard();
+
+        setupAction(argc, argv);
+
+        setupItems(argc, argv);
+
+        checkForNoItems();
+
+        startIndicator();
+
+        deduplicateItems();
+
+        checkItemSize();
+
+        clearTempDirectory();
+
+        performAction();
+
+        updateGUIClipboard();
+
+        stopIndicator();
+
+        showFailures();
+
+        showSuccesses();
+    } catch (const std::exception& e) {
+        if (stopIndicator()) {
+            fprintf(stderr, replaceColors(internal_error_message).data(), e.what());
+        }
+        exit(EXIT_FAILURE);
+    }
+    exit(EXIT_SUCCESS);
 }
