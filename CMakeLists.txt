@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 project(Clipboard LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED True)
+set(CMAKE_CXX_STANDARD_REQUIRED True)jkljlksf]fkljflkd
+fkldjflkdsjf
+
+dkmjsllfsdhf
+sdlfknljfvbnd;p
 
 if (UNIX AND NOT APPLE)
   set(POSIX ON)
